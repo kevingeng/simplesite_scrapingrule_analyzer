@@ -7,11 +7,13 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel, Field
+import html2text
 
 from http_helper import headers, load_page, proxies_7890
 
 
 RE_HTTP = re.compile(r"^https?://", re.IGNORECASE)
+ht = html2text.HTML2Text()
 
 
 @dataclass
@@ -154,9 +156,20 @@ class SiteRuleAnalyzer:
             return out.site_type
         return "新闻类"
 
+
+    def _make_page_md(self, cache: dict[str, Any], base_url: str, raw_html: str, key: str) -> str:
+        page_md = str(cache.get(key, "") or "")
+        if page_md:
+            return page_md
+        ht.baseurl = base_url
+        ht.images_to_alt = True
+        page_md = ht.handle(raw_html or "")
+        cache[key] = page_md
+        return page_md
+
     def _step_4_extract_navs_with_llm(self, base_url: str, homepage_html: str, site_type: str) -> list[dict[str, str]]:
-        soup = BeautifulSoup(homepage_html, "html.parser")
-        text = "\n".join(a.get_text(" ", strip=True) + " | " + (a.get("href") or "") for a in soup.select("a[href]")[:200])
+        md_cache: dict[str, Any] = {}
+        text = self._make_page_md(md_cache, base_url, homepage_html, "mainpage_markdown")[:9000]
         if site_type == "新闻类":
             instruction = (
                 "从首页导航候选中提取与[政治类,国际新闻类,当地新闻类,战争类,法律犯罪类,灾难事件类]相关项，返回nav_items"
@@ -181,8 +194,8 @@ class SiteRuleAnalyzer:
         return [{"url": n["url"], "nav_label": n.get("label", "")} for n in navs[: self.list_page_limit]]
 
     def _step_5_extract_list_items_with_llm(self, page_url: str, page_html: str) -> list[dict[str, str]]:
-        soup = BeautifulSoup(page_html, "html.parser")
-        md_like = "\n".join(a.get_text(" ", strip=True) + " | " + (a.get("href") or "") for a in soup.select("a[href]")[:500])
+        md_cache: dict[str, Any] = {}
+        md_like = self._make_page_md(md_cache, page_url, page_html, "listpage_markdown")[:12000]
         instruction = (
             "这是内容列表页候选。提取主体列表项（title,href）；若不是列表页返回list_page_type='不是列表页'且list_items空。"
         )
@@ -207,7 +220,9 @@ class SiteRuleAnalyzer:
             "date": "str",
             "body": "str",
         }
-        out = self.lmc.extract(instruction, f"url={page_url}\nhtml={page_html[:15000]}\nschema={schema}")
+        md_cache: dict[str, Any] = {}
+        page_md = self._make_page_md(md_cache, page_url, page_html, "contentpage_markdown")[:15000]
+        out = self.lmc.extract(instruction, f"url={page_url}\nmarkdown={page_md}\nschema={schema}")
         if isinstance(out, dict):
             return {
                 "title": str(out.get("title", "")),
