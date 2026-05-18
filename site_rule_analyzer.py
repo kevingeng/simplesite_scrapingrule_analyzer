@@ -5,9 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel, Field
+
+from http_helper import headers, load_page, proxies_7890
 
 
 RE_HTTP = re.compile(r"^https?://", re.IGNORECASE)
@@ -80,8 +81,8 @@ class SiteRuleAnalyzer:
         self.timeout = timeout
         self.list_page_limit = list_page_limit
         self.content_per_list_limit = content_per_list_limit
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": user_agent})
+        self.session = None
+        self.user_agent = user_agent
 
     def analyze_site(self, target: str) -> SiteAnalyzeResult:
         result = SiteAnalyzeResult(input_url=target)
@@ -305,11 +306,27 @@ class SiteRuleAnalyzer:
         return " > ".join(reversed(parts))
 
     def _fetch(self, url: str) -> FetchResult:
+        ret: dict[str, Any] = {}
+        ok = load_page(
+            url,
+            ret,
+            session=self.session,
+            headers=headers,
+            proxies=proxies_7890,
+            timeout=self.timeout,
+        )
+        code_raw = str(ret.get("code", "")).split(",")[-1].strip()
         try:
-            resp = self.session.get(url, timeout=self.timeout)
-            return FetchResult(url=resp.url, ok=resp.ok, status_code=resp.status_code, text=resp.text)
-        except Exception as exc:  # noqa: BLE001
-            return FetchResult(url=url, ok=False, error=str(exc))
+            status_code = int(code_raw) if code_raw else None
+        except ValueError:
+            status_code = None
+        return FetchResult(
+            url=url,
+            ok=bool(ok),
+            status_code=status_code,
+            text=str(ret.get("content", "") or ""),
+            error=None if ok else str(ret.get("code", "load_page_failed")),
+        )
 
 
 __all__ = ["SiteRuleAnalyzer", "SiteAnalyzeResult"]
