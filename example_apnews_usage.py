@@ -16,16 +16,19 @@ from site_rule_analyzer import SiteRuleAnalyzer
 
 def main() -> None:
     # 你可以按自己的模型配置替换这里
-    lmc = MyLLMClient(model=MyLLMClient.LLM_MODELS_DIC["qwen3-max"])
-
+    lmc = MyLLMClient(model=MyLLMClient.LLM_MODELS_DIC["max"])
+    target_site="http://www.zaobao.com"
+    
     analyzer = SiteRuleAnalyzer(
+        target_site=target_site,
+        site_meta={},
         lmc=lmc,
         list_page_limit=3,
         content_per_list_limit=3,
         timeout=(5, 20),
     )
 
-    result = analyzer.analyze_site("https://apnews.com/")
+    result = analyzer.analyze_site()
 
     print("\n=== 基本信息 ===")
     print("input_url:", result.input_url)

@@ -65,21 +65,26 @@ class SiteRuleAnalyzer:
 
     def __init__(
         self,
+        target_site,
+        site_meta,        
         *,
         lmc: Any,
         timeout: tuple[int, int] = (5, 20),
         list_page_limit: int = 3,
         content_per_list_limit: int = 3,
     ) -> None:
-        if lmc is None:
-            raise ValueError("lmc 不能为空：请传入你的 llm_client 实例")
+        self.target_site=target_site
+        self.site_meta=site_meta
+        if lmc is None: raise ValueError("lmc 不能为空：请传入你的 llm_client 实例")
         self.lmc = lmc
         self.timeout = timeout
         self.list_page_limit = list_page_limit
         self.content_per_list_limit = content_per_list_limit
         self.session = None
+        # self.analyze_site()
 
-    def analyze_site(self, target: str) -> SiteAnalyzeResult:
+    def analyze_site(self) -> SiteAnalyzeResult:
+        target=self.target_site
         result = SiteAnalyzeResult(input_url=target)
         normalized = self._step_1_validate_target(target)
         if not normalized:
@@ -135,6 +140,7 @@ class SiteRuleAnalyzer:
 
     def _step_2_probe_protocol_and_fetch_home(self, target: str) -> FetchResult:
         candidates = [target] if RE_HTTP.match(target) else [f"https://{target}", f"http://{target}"]
+        print(f'::candidates:{candidates}')
         for u in candidates:
             r = self._fetch(u)
             if r.ok:
@@ -315,6 +321,7 @@ class SiteRuleAnalyzer:
             status_code = int(code_raw) if code_raw else None
         except ValueError:
             status_code = None
+        
         return FetchResult(
             url=url,
             ok=bool(ok),
