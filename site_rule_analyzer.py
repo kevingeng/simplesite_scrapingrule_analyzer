@@ -68,10 +68,6 @@ class SiteRuleAnalyzer:
         *,
         lmc: Any,
         timeout: tuple[int, int] = (5, 20),
-        user_agent: str = (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
         list_page_limit: int = 3,
         content_per_list_limit: int = 3,
     ) -> None:
@@ -82,7 +78,6 @@ class SiteRuleAnalyzer:
         self.list_page_limit = list_page_limit
         self.content_per_list_limit = content_per_list_limit
         self.session = None
-        self.user_agent = user_agent
 
     def analyze_site(self, target: str) -> SiteAnalyzeResult:
         result = SiteAnalyzeResult(input_url=target)
