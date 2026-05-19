@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
 
@@ -75,11 +75,13 @@ def _infer_list_rule_from_page(raw_html: str, items: list[dict[str, str]], base_
     lca = _lowest_common_ancestor(matched)
     if lca is None:
         return None
+    root_selector = _make_unique_root_selector(soup, lca)
     paths = [_css_relative_path(lca, n) for n in matched[:20]]
-    branch = _common_branch(paths)
+    branch = _common_branch(paths) or "a[href]"
+    branch = _refine_branch_selector(lca, matched[:20], branch)
     return {
-        "root_selector": _selector_with_identity(lca),
-        "item_selector": branch or "a[href]",
+        "root_selector": root_selector,
+        "item_selector": branch,
         "item_link_selector": "a[href]",
     }
 
@@ -102,6 +104,45 @@ def _infer_content_rule_from_page(raw_html: str, fields: dict[str, str]) -> Opti
         "paragraph_selector": "p",
     }
 
+
+
+def _make_unique_root_selector(soup: BeautifulSoup, node: Tag) -> str:
+    base = _selector_with_identity(node)
+    if _safe_select_count(soup, base) == 1:
+        return base
+    # fallback to full path to guarantee uniqueness as much as possible
+    full = _css_path(node)
+    if _safe_select_count(soup, full) == 1:
+        return full
+    return base
+
+
+def _refine_branch_selector(root: Tag, targets: list[Tag], candidate: str) -> str:
+    # 目标：包含所有 targets，且尽量不包含其他元素
+    target_ids = {id(x) for x in targets}
+    best = candidate
+    best_extra = 10**9
+    candidates = [candidate, "a[href]", ".//a[@href]"]
+    for c in candidates:
+        if c == ".//a[@href]":
+            nodes = root.select("a[href]")
+        else:
+            nodes = root.select(c)
+        node_ids = {id(x) for x in nodes}
+        if not target_ids.issubset(node_ids):
+            continue
+        extra = len(node_ids - target_ids)
+        if extra < best_extra:
+            best = c if c != ".//a[@href]" else "a[href]"
+            best_extra = extra
+    return best
+
+
+def _safe_select_count(soup: BeautifulSoup, selector: str) -> int:
+    try:
+        return len(soup.select(selector))
+    except Exception:
+        return 0
 
 def _pick_canonical_rule(rules: list[dict[str, Any]], key: str) -> Optional[dict[str, Any]]:
     if not rules:
