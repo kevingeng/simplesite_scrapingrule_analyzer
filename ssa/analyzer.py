@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -129,24 +128,17 @@ class SiteRuleAnalyzer:
             self.log.debug("cache hit llm: model=%s", model_name)
             if model is None:
                 return cached
-            try:
-                return model.model_validate(cached) if isinstance(cached, dict) else cached
-            except Exception:  # noqa: BLE001
-                return cached
-        try:
-            if model is None:
-                out = self.lmc.extract(instruction, content)
-                self._cache_set(cache_key, out)
-                return out
-            out = self.lmc.extract(instruction, content, model)
-            if hasattr(out, "model_dump"):
-                self._cache_set(cache_key, out.model_dump())
-            else:
-                self._cache_set(cache_key, out)
+            return model.model_validate(cached) if isinstance(cached, dict) else cached
+        if model is None:
+            out = self.lmc.extract(instruction, content)
+            self._cache_set(cache_key, out)
             return out
-        except Exception as ex:  # noqa: BLE001
-            self.log.exception("lmc.extract failed: %s", ex)
-            return None
+        out = self.lmc.extract(instruction, content, model)
+        if hasattr(out, "model_dump"):
+            self._cache_set(cache_key, out.model_dump())
+        else:
+            self._cache_set(cache_key, out)
+        return out
 
     def _step_1_validate_target(self, step: dict[str, Any], target: str) -> dict[str, Any]:
         self.log.info("step1 validate target")
@@ -200,26 +192,6 @@ class SiteRuleAnalyzer:
         step["homepage_navs"] = navs
         return step
 
-    def _coerce_listpage_model(self, out: Any) -> Optional[ListPageModel]:
-        if isinstance(out, ListPageModel):
-            if isinstance(out.list_items, str):
-                try:
-                    fixed_items = json.loads(out.list_items.strip())
-                    out = ListPageModel(list_page_type=out.list_page_type, list_items=fixed_items)
-                except Exception:
-                    self.log.warning("list_items was string but json parse failed")
-                    return None
-            return out
-        if isinstance(out, dict):
-            try:
-                if isinstance(out.get("list_items"), str):
-                    out["list_items"] = json.loads(out["list_items"].strip())
-                return ListPageModel.model_validate(out)
-            except Exception as ex:  # noqa: BLE001
-                self.log.warning("coerce dict->ListPageModel failed: %s", ex)
-                return None
-        return None
-
     def _step_5_lists(self, step: dict[str, Any], navs: list[dict[str, str]]) -> dict[str, Any]:
         self.log.info("step5 list pages")
         if step.get("sampled_list_pages") is not None and step.get("list_rules") is not None:
@@ -231,10 +203,9 @@ class SiteRuleAnalyzer:
             if not fr.ok:
                 continue
             md = self._make_page_md(n["url"], fr.text)[:12000]
-            out_raw = self._safe_extract("提取主体列表项title/href，不是列表页返回空", md, ListPageModel)
-            out = self._coerce_listpage_model(out_raw)
+            out = self._safe_extract("提取主体列表项title/href，不是列表页返回空", md, ListPageModel)
             items = []
-            if out and out.list_page_type != "不是列表页":
+            if out.list_page_type != "不是列表页":
                 items = [{"title": i.title, "href": urljoin(n["url"], i.href)} for i in out.list_items]
             self.log.debug("step5[%d] list_page_type=%s items=%d", idx, out.list_page_type if out else None, len(items))
             soup = BeautifulSoup(fr.text, "html.parser")
