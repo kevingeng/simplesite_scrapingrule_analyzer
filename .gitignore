@@ -1,3 +1,6 @@
+llm_client.py
+http_helper.py
+*.ipynb
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
