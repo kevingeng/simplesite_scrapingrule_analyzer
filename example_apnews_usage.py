@@ -10,7 +10,7 @@
 
 from pprint import pprint
 
-from llm_client import MyLLMClient
+from .llm_client import MyLLMClient
 from site_rule_analyzer import SiteRuleAnalyzer
 
 

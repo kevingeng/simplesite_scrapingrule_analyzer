@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel, Field
 import html2text
 
-from http_helper import headers, load_page, proxies_7890
+from .http_helper import headers, load_page, proxies_7890
 
 
 RE_HTTP = re.compile(r"^https?://", re.IGNORECASE)
@@ -61,7 +61,12 @@ class ListPageModel(BaseModel):
     list_page_type: Literal["文章列表页", "子类别列表页", "不是列表页"] = Field(..., description="列表页类型")
     list_items: list[ListPageItemModel] = Field(default_factory=list)
 
-
+class ArticleModel(BaseModel):
+    title: str = Field(...,description='文章标题。')
+    date: str = Field(...,description='文章日期，一般正文页都有这个文章的发布日期或类似的日期，有些也包括了时间部分。')
+    content: str = Field(...,description='文章内容，一般是由一个或多个段落的文本组成。')
+    
+    
 class SiteRuleAnalyzer:
     """按你原先 notebook 方式改造：核心识别由 lmc.extract 驱动，DOM/LCA 用于规则落地。"""
 
@@ -215,22 +220,11 @@ class SiteRuleAnalyzer:
 
     def _step_6_extract_content_fields_with_llm(self, page_url: str, page_html: str) -> dict[str, str]:
         # 保持你的原方式：正文字段也交给 LLM 先抽出，再回贴 DOM 推规则
-        instruction = "从新闻正文页HTML中提取title/date/body(正文纯文本)三个字段，没有则空字符串。"
-        schema = {
-            "title": "str",
-            "date": "str",
-            "body": "str",
-        }
+        instruction = "从新闻正文页HTML中提取title/date/content(正文纯文本)三个字段，没有则空字符串。"
         md_cache: dict[str, Any] = {}
         page_md = self._make_page_md(md_cache, page_url, page_html, "contentpage_markdown")[:15000]
-        out = self.lmc.extract(instruction, f"url={page_url}\nmarkdown={page_md}\nschema={schema}")
-        if isinstance(out, dict):
-            return {
-                "title": str(out.get("title", "")),
-                "date": str(out.get("date", "")),
-                "body": str(out.get("body", "")),
-            }
-        return {"title": "", "date": "", "body": ""}
+        out = self.lmc.extract(instruction, f"url={page_url}\nmarkdown={page_md}\nschema={schema}",ArticleModel)
+        return out
 
     def _infer_list_dom_rule(self, soup: BeautifulSoup, items: list[dict[str, str]], base_url: str) -> Optional[dict[str, Any]]:
         matched_nodes: list[Tag] = []
