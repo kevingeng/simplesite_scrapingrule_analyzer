@@ -56,3 +56,10 @@ class ArticleModel(BaseModel):
     title: str = Field(..., description="文章标题")
     date: str = Field(..., description="文章日期")
     content: str = Field(..., description="文章正文内容")
+
+
+class ListItemsFitModel(BaseModel):
+    fit_count: int = Field(..., description="抽样列表项中符合目标类型的数量")
+    total_count: int = Field(..., description="抽样列表项总数")
+    passed: bool = Field(..., description="该列表页是否通过类型验证")
+    reason: str = Field(..., description="简短原因")
