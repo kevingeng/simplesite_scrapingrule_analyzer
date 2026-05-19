@@ -21,13 +21,14 @@ def main() -> None:
     parser.add_argument("--work-root", default=str(ROOT / "work_sites"))
     parser.add_argument("--force-restep", type=int, default=0)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--llm-name", default="max")
     args = parser.parse_args()
 
     logger = make_logger(args.log_level)
     site_dir = Path(args.work_root) / args.site_name
     site_dir.mkdir(parents=True, exist_ok=True)
 
-    lmc = MyLLMClient(model=MyLLMClient.LLM_MODELS_DIC["qwen3-max"])
+    lmc = MyLLMClient(model=MyLLMClient.LLM_MODELS_DIC[args.llm_name])
     analyzer = SiteRuleAnalyzer(lmc=lmc, work_dir=site_dir, log=logger)
     result = analyzer.analyze_site(args.site_url, force_restep=args.force_restep)
 

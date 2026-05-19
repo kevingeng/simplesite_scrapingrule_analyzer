@@ -202,7 +202,7 @@ class SiteRuleAnalyzer:
             self.log.debug("step5[%d] fetch url=%s ok=%s status=%s", idx, n['url'], fr.ok, fr.status_code)
             if not fr.ok:
                 continue
-            md = self._make_page_md(n["url"], fr.text)[:12000]
+            md = self._make_page_md(n["url"], fr.text)[:8000]
             out = self._safe_extract("提取主体列表项title/href，不是列表页返回空", md, ListPageModel)
             items = []
             if out.list_page_type != "不是列表页":
