@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import re
+import random
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 import html2text
 from bs4 import BeautifulSoup, Tag
+try:
+    from selectolax.parser import HTMLParser
+except Exception:  # noqa: BLE001
+    HTMLParser = None
 
 from tools.http_helper import headers, load_page, proxies_7890
-from .models import ArticleModel, FetchResult, ListPageModel, NavListModel, SiteAnalyzeResult, SiteTypeModel
+from .models import ArticleModel, FetchResult, ListItemsFitModel, ListPageModel, NavListModel, SiteAnalyzeResult, SiteTypeModel
 from .utils import load_json, save_json
 
 RE_HTTP = re.compile(r"^https?://", re.IGNORECASE)
@@ -26,6 +31,7 @@ class SiteRuleAnalyzer:
         self.session = None
         self.state: dict[str, Any] = load_json(self.state_path)
         self.state.setdefault("cache", {})
+        self._rand = random.Random(42)
 
     def _persist(self) -> None:
         save_json(self.state_path, self.state)
@@ -207,12 +213,19 @@ class SiteRuleAnalyzer:
             items = []
             if out.list_page_type != "不是列表页":
                 items = [{"title": i.title, "href": urljoin(n["url"], i.href)} for i in out.list_items]
+            fit = self._validate_list_items_fit(items, self.state["step3"]["site_type"])
+            if not fit.passed:
+                sampled.append({"url": n["url"], "items": items, "raw_html": fr.text, "validated": False, "fit_reason": fit.reason})
+                self.log.info("step5[%d] ignored by type-check: %s", idx, fit.reason)
+                continue
             self.log.debug("step5[%d] list_page_type=%s items=%d", idx, out.list_page_type if out else None, len(items))
-            soup = BeautifulSoup(fr.text, "html.parser")
+            soup = self._make_soup(fr.text)
             rule = self._infer_list_dom_rule(soup, items, n["url"])
             if rule:
                 rules.append(rule)
-            sampled.append({"url": n["url"], "items": items, "raw_html": fr.text})
+            sampled.append({"url": n["url"], "items": items, "raw_html": fr.text, "validated": True, "fit_reason": fit.reason})
+        if not any(p.get("validated") for p in sampled):
+            raise RuntimeError("所有列表页都被类型校验过滤，无法继续")
         step["sampled_list_pages"] = sampled
         step["list_rules"] = rules
         return step
@@ -222,7 +235,7 @@ class SiteRuleAnalyzer:
         if step.get("sampled_content_pages") is not None and step.get("content_rules") is not None:
             return step
         pages, rules = step.get("sampled_content_pages", []), step.get("content_rules", [])
-        for lp_idx, lp in enumerate(list_pages, start=1):
+        for lp_idx, lp in enumerate([p for p in list_pages if p.get("validated")], start=1):
             for it_idx, it in enumerate(lp.get("items", [])[:3], start=1):
                 fr = self._fetch(it["href"])
                 self.log.debug("step6[%d.%d] fetch url=%s ok=%s", lp_idx, it_idx, it['href'], fr.ok)
@@ -230,7 +243,7 @@ class SiteRuleAnalyzer:
                     continue
                 md = self._make_page_md(fr.url, fr.text)[:15000]
                 fields = self._safe_extract("提取title/date/content", md, ArticleModel)
-                soup = BeautifulSoup(fr.text, "html.parser")
+                soup = self._make_soup(fr.text)
                 normalized = {"title": fields.title, "date": fields.date, "body": fields.content}
                 rule = self._infer_content_dom_rule(soup, normalized)
                 if rule:
@@ -272,7 +285,14 @@ class SiteRuleAnalyzer:
         lca = self._lowest_common_ancestor(matched)
         if not lca:
             return None
-        return {"root_selector": self._selector_with_identity(lca), "item_branch_selectors": [self._css_path(n) for n in matched[:10]], "item_link_selector": "a[href]"}
+        return {
+            "root_selector": self._selector_with_identity(lca),
+            "root_xpath": self._xpath_path(lca),
+            "item_branch_selectors": [self._css_path(n) for n in matched[:10]],
+            "item_branch_xpaths": [self._xpath_path(n) for n in matched[:10]],
+            "item_link_selector": "a[href]",
+            "item_link_xpath": ".//a[@href]",
+        }
 
     def _infer_content_dom_rule(self, soup: BeautifulSoup, fields: dict[str, str]) -> Optional[dict[str, Any]]:
         chunks = [c.strip() for c in fields.get("body", "").split("\n") if len(c.strip()) > 12]
@@ -284,7 +304,52 @@ class SiteRuleAnalyzer:
         lca = self._lowest_common_ancestor(matched)
         if not lca:
             return None
-        return {"content_root_selector": self._selector_with_identity(lca), "title_selector": "h1", "date_selector": "time", "paragraph_selector": "p"}
+        return {
+            "content_root_selector": self._selector_with_identity(lca),
+            "content_root_xpath": self._xpath_path(lca),
+            "title_selector": "h1",
+            "title_xpath": ".//h1",
+            "date_selector": "time",
+            "date_xpath": ".//time",
+            "paragraph_selector": "p",
+            "paragraph_xpath": ".//p",
+        }
+
+    def _validate_list_items_fit(self, items: list[dict[str, str]], site_type: str) -> ListItemsFitModel:
+        if not items:
+            return ListItemsFitModel(fit_count=0, total_count=0, passed=False, reason="空列表项")
+        sample = self._sample_items(items)
+        text = "\n".join([f"- {x.get('title','')} | {x.get('href','')}" for x in sample])
+        ins = (
+            "根据站点类型判断这些列表项是否符合目标新闻采集主题。新闻类关注政治/国际/战争军事/法律犯罪/灾难社会等；"
+            "机构类关注政策/法律/新闻公告。返回fit_count,total_count,passed,reason。"
+        )
+        out = self._safe_extract(ins + f"\n站点类型:{site_type}", text, ListItemsFitModel)
+        return out
+
+    def _sample_items(self, items: list[dict[str, str]]) -> list[dict[str, str]]:
+        n = len(items)
+        if n <= 6:
+            return items
+        if n < 15:
+            head, tail, midn = 3, 3, 5
+        else:
+            head, tail, midn = 5, 5, 5
+        head_items = items[:head]
+        tail_items = items[-tail:]
+        middle = items[head : max(head, n - tail)]
+        k = min(midn, len(middle))
+        mid_items = self._rand.sample(middle, k) if k > 0 else []
+        return head_items + mid_items + tail_items
+
+    def _make_soup(self, html: str) -> BeautifulSoup:
+        if HTMLParser is not None:
+            try:
+                tree = HTMLParser(html)
+                return BeautifulSoup(tree.html or html, "html.parser")
+            except Exception:  # noqa: BLE001
+                pass
+        return BeautifulSoup(html, "html.parser")
 
     def _lowest_common_ancestor(self, nodes: list[Tag]) -> Optional[Tag]:
         paths = [self._ancestor_chain(n) for n in nodes]
@@ -314,8 +379,48 @@ class SiteRuleAnalyzer:
     def _css_path(self, node: Tag) -> str:
         parts, cur = [], node
         while isinstance(cur, Tag) and cur.name != "[document]":
-            sibs = [s for s in cur.parent.find_all(cur.name, recursive=False)] if isinstance(cur.parent, Tag) else [cur]
-            idx = sibs.index(cur) + 1 if cur in sibs else 1
-            parts.append(f"{cur.name}:nth-of-type({idx})")
+            if cur.name in {"html", "body"}:
+                cur = cur.parent if isinstance(cur.parent, Tag) else None
+                continue
+            token = cur.name
+            if cur.get("id"):
+                token = f"#{cur['id']}"
+                parts.append(token)
+                break
+            classes = [c for c in (cur.get("class") or []) if isinstance(c, str)]
+            if classes:
+                token = f"{cur.name}." + ".".join(classes[:2])
+            else:
+                attr_name = next((k for k in cur.attrs.keys() if isinstance(k, str) and k.startswith("data-")), None)
+                if attr_name:
+                    token = f'{cur.name}[{attr_name}="{cur.attrs[attr_name]}"]'
+                elif isinstance(cur.parent, Tag):
+                    sibs = [s for s in cur.parent.find_all(cur.name, recursive=False)]
+                    idx = sibs.index(cur) + 1 if cur in sibs else 1
+                    token = cur.name if idx == 1 else f"{cur.name}:nth-of-type({idx})"
+            parts.append(token)
             cur = cur.parent if isinstance(cur.parent, Tag) else None
         return " > ".join(reversed(parts))
+
+    def _xpath_path(self, node: Tag) -> str:
+        parts: list[str] = []
+        cur: Optional[Tag] = node
+        while isinstance(cur, Tag) and cur.name != "[document]":
+            if cur.name in {"html", "body"}:
+                cur = cur.parent if isinstance(cur.parent, Tag) else None
+                continue
+            if cur.get("id"):
+                parts.append(f'*[@id="{cur["id"]}"]')
+                break
+            classes = [c for c in (cur.get("class") or []) if isinstance(c, str)]
+            if classes:
+                parts.append(f'{cur.name}[contains(concat(" ", normalize-space(@class), " "), " {classes[0]} ")]')
+            else:
+                if isinstance(cur.parent, Tag):
+                    sibs = [s for s in cur.parent.find_all(cur.name, recursive=False)]
+                    idx = sibs.index(cur) + 1 if cur in sibs else 1
+                    parts.append(cur.name if idx == 1 else f"{cur.name}[{idx}]")
+                else:
+                    parts.append(cur.name)
+            cur = cur.parent if isinstance(cur.parent, Tag) else None
+        return "//" + "/".join(reversed(parts))

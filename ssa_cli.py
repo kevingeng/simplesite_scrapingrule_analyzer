@@ -31,7 +31,15 @@ def main() -> None:
     analyzer = SiteRuleAnalyzer(lmc=lmc, work_dir=site_dir, log=logger)
     result = analyzer.analyze_site(args.site_url, force_restep=args.force_restep)
 
-    save_json(site_dir / "result.json", result.__dict__)
+    final_rules = {
+        "input_url": result.input_url,
+        "normalized_url": result.normalized_url,
+        "site_type": result.site_type,
+        "list_rules": result.list_rules,
+        "content_rules": result.content_rules,
+        "errors": result.errors,
+    }
+    save_json(site_dir / "result.json", final_rules)
     logger.info("done: %s", site_dir / "result.json")
 
 
