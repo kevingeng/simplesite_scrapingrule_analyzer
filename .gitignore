@@ -1,3 +1,7 @@
+_deleted/
+work_sites/
+tools/
+*.ipynb
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
