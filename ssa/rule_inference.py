@@ -130,6 +130,10 @@ def _common_branch(paths: list[str]) -> str:
             prefix.append(parts[0][i])
         else:
             break
+    # 如果公共前缀里出现了 id 选择器，id 之前的层级是冗余的
+    for i, seg in enumerate(prefix):
+        if seg.startswith("#"):
+            return " > ".join(prefix[i:])
     return " > ".join(prefix)
 
 
@@ -166,7 +170,10 @@ def _css_relative_path(root: Tag, node: Tag) -> str:
     parts = []
     cur: Optional[Tag] = node
     while isinstance(cur, Tag) and cur is not root:
-        parts.append(_segment(cur))
+        seg = _segment(cur)
+        parts.append(seg)
+        if seg.startswith("#"):
+            return " > ".join(reversed(parts))
         cur = cur.parent if isinstance(cur.parent, Tag) else None
     if cur is root:
         parts.append(":scope")
