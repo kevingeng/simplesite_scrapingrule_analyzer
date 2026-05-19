@@ -17,6 +17,7 @@ except Exception:  # noqa: BLE001
 from tools.http_helper import headers, load_page, proxies_7890
 from .models import ArticleModel, FetchResult, ListItemsFitModel, ListPageModel, NavListModel, SiteAnalyzeResult, SiteTypeModel
 from .utils import load_json, save_json
+from .rule_inference import infer_content_rules, infer_list_rules
 
 RE_HTTP = re.compile(r"^https?://", re.IGNORECASE)
 ht = html2text.HTML2Text()
@@ -40,7 +41,7 @@ class SiteRuleAnalyzer:
         save_json(self.state_path, self.state)
 
     def _clear_from_step(self, force_restep: int) -> None:
-        keys = ["step1", "step2", "step3", "step4", "step5", "step6", "result"]
+        keys = ["step1", "step2", "step3", "step4", "step5", "step6", "step7", "result"]
         for i, k in enumerate(keys, start=1):
             if i >= force_restep and k in self.state:
                 self.state.pop(k, None)
@@ -98,8 +99,15 @@ class SiteRuleAnalyzer:
         s6 = self.state.get("step6") or {"step_idx": 6}
         self.state["step6"] = s6
         s6 = self._step_6_contents(s6, s5.get("sampled_list_pages", []))
-        self.log.debug("step6 done: content_pages=%d content_rules=%d", len(s6.get("sampled_content_pages", [])), len(s6.get("content_rules", [])))
+        self.log.debug("step6 done: content_pages=%d", len(s6.get("sampled_content_pages", [])))
         self.state["step6"] = s6
+        self._persist()
+
+        s7 = self.state.get("step7") or {"step_idx": 7}
+        self.state["step7"] = s7
+        s7 = self._step_7_infer_rules(s7, s5.get("sampled_list_pages", []), s6.get("sampled_content_pages", []))
+        self.log.debug("step7 done: list_rules=%s content_rules=%s", bool(s7.get("list_rule_bundle")), bool(s7.get("content_rule_bundle")))
+        self.state["step7"] = s7
         self._persist()
 
         res = SiteAnalyzeResult(
@@ -109,8 +117,8 @@ class SiteRuleAnalyzer:
             homepage_navs=s4["homepage_navs"],
             sampled_list_pages=s5["sampled_list_pages"],
             sampled_content_pages=s6["sampled_content_pages"],
-            list_rules=s5["list_rules"],
-            content_rules=s6["content_rules"],
+            list_rules=[s7.get("list_rule_bundle", {})],
+            content_rules=[s7.get("content_rule_bundle", {})],
             errors=[],
         )
         self.state["result"] = res.__dict__
@@ -224,9 +232,9 @@ class SiteRuleAnalyzer:
 
     def _step_5_lists(self, step: dict[str, Any], navs: list[dict[str, str]]) -> dict[str, Any]:
         self.log.info("step5 list pages")
-        if step.get("sampled_list_pages") is not None and step.get("list_rules") is not None:
+        if step.get("sampled_list_pages") is not None:
             return step
-        sampled, rules = step.get("sampled_list_pages", []), step.get("list_rules", [])
+        sampled = step.get("sampled_list_pages", [])
         pending_navs = [n for n in navs if n.get("url") and all(p.get("url") != n.get("url") for p in sampled)]
 
         def _process_nav(n: dict[str, Any]) -> dict[str, Any]:
@@ -240,31 +248,24 @@ class SiteRuleAnalyzer:
             if out.list_page_type != "不是列表页":
                 items = [{"title": i.title, "href": urljoin(n["url"], i.href)} for i in out.list_items]
             fit = self._validate_list_items_fit(items, self.state["step3"]["site_type"])
-            rule = None
-            if fit.passed:
-                soup = self._make_soup(fr.text)
-                rule = self._infer_list_dom_rule(soup, items, n["url"])
-            return {"url": n["url"], "items": items, "raw_html": fr.text, "validated": bool(fit.passed), "fit_reason": fit.reason, "rule": rule}
+            return {"url": n["url"], "nav": n, "items": items, "raw_html": fr.text, "validated": bool(fit.passed), "fit_reason": fit.reason}
 
         if pending_navs:
             with ThreadPoolExecutor(max_workers=self.pool_size) as pool:
                 for result in pool.map(_process_nav, pending_navs):
-                    sampled.append({k: result[k] for k in ("url", "items", "raw_html", "validated", "fit_reason")})
-                    if result.get("rule"):
-                        rules.append(result["rule"])
+                    sampled.append({k: result[k] for k in ("url", "nav", "items", "raw_html", "validated", "fit_reason")})
                     if not result.get("validated"):
                         self.log.info("step5 ignored by type-check: %s %s", result.get("url"), result.get("fit_reason"))
         if not any(p.get("validated") for p in sampled):
             raise RuntimeError("所有列表页都被类型校验过滤，无法继续")
         step["sampled_list_pages"] = sampled
-        step["list_rules"] = rules
         return step
 
     def _step_6_contents(self, step: dict[str, Any], list_pages: list[dict[str, Any]]) -> dict[str, Any]:
         self.log.info("step6 content pages")
-        if step.get("sampled_content_pages") is not None and step.get("content_rules") is not None:
+        if step.get("sampled_content_pages") is not None:
             return step
-        pages, rules = step.get("sampled_content_pages", []), step.get("content_rules", [])
+        pages = step.get("sampled_content_pages", [])
         done_urls = {p.get("url") for p in pages}
         tasks: list[dict[str, Any]] = []
         for lp in [p for p in list_pages if p.get("validated")]:
@@ -279,21 +280,26 @@ class SiteRuleAnalyzer:
                 return None
             md = self._make_page_md(fr.url, fr.text)[:15000]
             fields = self._safe_extract("提取title/date/content", md, ArticleModel)
-            soup = self._make_soup(fr.text)
             normalized = {"title": fields.title, "date": fields.date, "body": fields.content}
-            rule = self._infer_content_dom_rule(soup, normalized)
-            return {"url": fr.url, "fields": normalized, "rule": rule}
+            return {"url": fr.url, "raw_html": fr.text, "fields": normalized}
 
         if tasks:
             with ThreadPoolExecutor(max_workers=self.pool_size) as pool:
                 for out in pool.map(_process_content, tasks):
                     if not out:
                         continue
-                    pages.append({"url": out["url"], "fields": out["fields"]})
-                    if out.get("rule"):
-                        rules.append(out["rule"])
+                    pages.append({"url": out["url"], "raw_html": out["raw_html"], "fields": out["fields"]})
         step["sampled_content_pages"] = pages
-        step["content_rules"] = rules
+        return step
+
+    def _step_7_infer_rules(self, step: dict[str, Any], list_pages: list[dict[str, Any]], content_pages: list[dict[str, Any]]) -> dict[str, Any]:
+        self.log.info("step7 infer selectors")
+        if step.get("list_rule_bundle") and step.get("content_rule_bundle"):
+            return step
+        list_bundle = infer_list_rules(list_pages)
+        content_bundle = infer_content_rules(content_pages)
+        step["list_rule_bundle"] = list_bundle
+        step["content_rule_bundle"] = content_bundle
         return step
 
     def _fetch(self, url: str, bypass_param: Optional[tuple[str, str]] = None, force_refresh: bool = False) -> FetchResult:
