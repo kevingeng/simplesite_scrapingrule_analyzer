@@ -225,7 +225,8 @@ class SiteRuleAnalyzer:
         if step.get("sampled_list_pages") is not None and step.get("list_rules") is not None:
             return step
         sampled, rules = step.get("sampled_list_pages", []), step.get("list_rules", [])
-        for idx, n in enumerate(navs[:3], start=1):
+        for idx, n in enumerate(navs[:], start=1):
+            if sampled and len(sampled)>=3:break
             fr = self._fetch(n["url"])
             self.log.debug("step5[%d] fetch url=%s ok=%s status=%s", idx, n['url'], fr.ok, fr.status_code)
             if not fr.ok:
@@ -402,7 +403,7 @@ class SiteRuleAnalyzer:
         sample = self._sample_items(items)
         text = "\n".join([f"- {x.get('title','')} | {x.get('href','')}" for x in sample])
         ins = (
-            "根据站点类型判断这些列表项是否符合目标新闻采集主题。新闻类关注政治/国际/战争军事/法律犯罪/灾难社会等；"
+            "根据站点类型判断这些列表项是否符合目标新闻采集主题。新闻类关注政治/国际/战争军事/人权/女性/社会公平/法律犯罪/灾难社会等；"
             "机构类关注政策/法律/新闻公告。返回fit_count,total_count,passed,reason。"
         )
         out = self._safe_extract(ins + f"\n站点类型:{site_type}", text, ListItemsFitModel)
