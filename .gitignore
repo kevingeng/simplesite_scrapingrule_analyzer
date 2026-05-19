@@ -1,5 +1,6 @@
-llm_client.py
-http_helper.py
+_deleted/
+work_sites/
+tools/
 *.ipynb
 # Byte-compiled / optimized / DLL files
 __pycache__/
