@@ -9,7 +9,7 @@ import html2text
 from bs4 import BeautifulSoup, Tag
 
 from tools.http_helper import headers, load_page, proxies_7890
-from .models import FetchResult, ListPageModel, NavListModel, SiteAnalyzeResult, SiteTypeModel
+from .models import ArticleModel, FetchResult, ListPageModel, NavListModel, SiteAnalyzeResult, SiteTypeModel
 from .utils import load_json, save_json
 
 RE_HTTP = re.compile(r"^https?://", re.IGNORECASE)
@@ -229,11 +229,9 @@ class SiteRuleAnalyzer:
                 if not fr.ok:
                     continue
                 md = self._make_page_md(fr.url, fr.text)[:15000]
-                fields = self._safe_extract("提取title/date/body", md) or {}
-                if not isinstance(fields, dict):
-                    fields = {}
+                fields = self._safe_extract("提取title/date/content", md, ArticleModel)
                 soup = BeautifulSoup(fr.text, "html.parser")
-                normalized = {"title": str(fields.get("title", "")), "date": str(fields.get("date", "")), "body": str(fields.get("body", ""))}
+                normalized = {"title": fields.title, "date": fields.date, "body": fields.content}
                 rule = self._infer_content_dom_rule(soup, normalized)
                 if rule:
                     rules.append(rule)

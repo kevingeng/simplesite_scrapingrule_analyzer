@@ -50,3 +50,9 @@ class ListPageItemModel(BaseModel):
 class ListPageModel(BaseModel):
     list_page_type: Literal["文章列表页", "子类别列表页", "不是列表页"] = Field(...)
     list_items: list[ListPageItemModel] = Field(default_factory=list)
+
+
+class ArticleModel(BaseModel):
+    title: str = Field(..., description="文章标题")
+    date: str = Field(..., description="文章日期")
+    content: str = Field(..., description="文章正文内容")
