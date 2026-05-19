@@ -21,7 +21,8 @@ def main() -> None:
     parser.add_argument("--work-root", default=str(ROOT / "work_sites"))
     parser.add_argument("--force-restep", type=int, default=0)
     parser.add_argument("--log-level", default="INFO")
-    parser.add_argument("--llm-name", default="max")
+    parser.add_argument("--pool-size", type=int, default=16)
+    parser.add_argument("--llm-name", default="qwen3-max")
     args = parser.parse_args()
 
     logger = make_logger(args.log_level)
@@ -29,7 +30,7 @@ def main() -> None:
     site_dir.mkdir(parents=True, exist_ok=True)
 
     lmc = MyLLMClient(model=MyLLMClient.LLM_MODELS_DIC[args.llm_name])
-    analyzer = SiteRuleAnalyzer(lmc=lmc, work_dir=site_dir, log=logger)
+    analyzer = SiteRuleAnalyzer(lmc=lmc, work_dir=site_dir, log=logger, pool_size=args.pool_size)
     result = analyzer.analyze_site(args.site_url, force_restep=args.force_restep)
 
     final_rules = {

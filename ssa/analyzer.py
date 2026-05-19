@@ -4,6 +4,7 @@ import re
 import random
 from pathlib import Path
 from typing import Any, Optional
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
 
 import html2text
@@ -22,13 +23,14 @@ ht = html2text.HTML2Text()
 
 
 class SiteRuleAnalyzer:
-    def __init__(self, *, lmc: Any, work_dir: Path, log, timeout: tuple[int, int] = (5, 20)) -> None:
+    def __init__(self, *, lmc: Any, work_dir: Path, log, timeout: tuple[int, int] = (5, 20), pool_size: int = 16) -> None:
         self.lmc = lmc
         self.work_dir = work_dir
         self.state_path = work_dir / "state.json"
         self.log = log
         self.timeout = timeout
         self.session = None
+        self.pool_size = max(1, int(pool_size or 16))
         self.state: dict[str, Any] = load_json(self.state_path)
         self.state.setdefault("cache", {})
         self.state.setdefault("site_flags", {"with_bypass": False, "bypass_param": None})
@@ -225,28 +227,33 @@ class SiteRuleAnalyzer:
         if step.get("sampled_list_pages") is not None and step.get("list_rules") is not None:
             return step
         sampled, rules = step.get("sampled_list_pages", []), step.get("list_rules", [])
-        for idx, n in enumerate(navs[:], start=1):
-            if sampled and len(sampled)>=3:break
+        pending_navs = [n for n in navs if n.get("url") and all(p.get("url") != n.get("url") for p in sampled)]
+
+        def _process_nav(n: dict[str, Any]) -> dict[str, Any]:
             fr = self._fetch(n["url"])
-            self.log.debug("step5[%d] fetch url=%s ok=%s status=%s", idx, n['url'], fr.ok, fr.status_code)
+            self.log.debug("step5 fetch url=%s ok=%s status=%s", n['url'], fr.ok, fr.status_code)
             if not fr.ok:
-                continue
-            md = self._make_page_md(n["url"], fr.text)[:8000]
+                return {"url": n["url"], "items": [], "raw_html": fr.text, "validated": False, "fit_reason": f"fetch_failed:{fr.status_code}"}
+            md = self._make_page_md(n["url"], fr.text)[:12000]
             out = self._safe_extract("提取主体列表项title/href，不是列表页返回空", md, ListPageModel)
             items = []
             if out.list_page_type != "不是列表页":
                 items = [{"title": i.title, "href": urljoin(n["url"], i.href)} for i in out.list_items]
             fit = self._validate_list_items_fit(items, self.state["step3"]["site_type"])
-            if not fit.passed:
-                sampled.append({"url": n["url"], "items": items, "raw_html": fr.text, "validated": False, "fit_reason": fit.reason})
-                self.log.info("step5[%d] ignored by type-check: %s", idx, fit.reason)
-                continue
-            self.log.debug("step5[%d] list_page_type=%s items=%d", idx, out.list_page_type if out else None, len(items))
-            soup = self._make_soup(fr.text)
-            rule = self._infer_list_dom_rule(soup, items, n["url"])
-            if rule:
-                rules.append(rule)
-            sampled.append({"url": n["url"], "items": items, "raw_html": fr.text, "validated": True, "fit_reason": fit.reason})
+            rule = None
+            if fit.passed:
+                soup = self._make_soup(fr.text)
+                rule = self._infer_list_dom_rule(soup, items, n["url"])
+            return {"url": n["url"], "items": items, "raw_html": fr.text, "validated": bool(fit.passed), "fit_reason": fit.reason, "rule": rule}
+
+        if pending_navs:
+            with ThreadPoolExecutor(max_workers=self.pool_size) as pool:
+                for result in pool.map(_process_nav, pending_navs):
+                    sampled.append({k: result[k] for k in ("url", "items", "raw_html", "validated", "fit_reason")})
+                    if result.get("rule"):
+                        rules.append(result["rule"])
+                    if not result.get("validated"):
+                        self.log.info("step5 ignored by type-check: %s %s", result.get("url"), result.get("fit_reason"))
         if not any(p.get("validated") for p in sampled):
             raise RuntimeError("所有列表页都被类型校验过滤，无法继续")
         step["sampled_list_pages"] = sampled
@@ -258,20 +265,33 @@ class SiteRuleAnalyzer:
         if step.get("sampled_content_pages") is not None and step.get("content_rules") is not None:
             return step
         pages, rules = step.get("sampled_content_pages", []), step.get("content_rules", [])
-        for lp_idx, lp in enumerate([p for p in list_pages if p.get("validated")], start=1):
-            for it_idx, it in enumerate(lp.get("items", [])[:3], start=1):
-                fr = self._fetch(it["href"])
-                self.log.debug("step6[%d.%d] fetch url=%s ok=%s", lp_idx, it_idx, it['href'], fr.ok)
-                if not fr.ok:
-                    continue
-                md = self._make_page_md(fr.url, fr.text)[:15000]
-                fields = self._safe_extract("提取title/date/content", md, ArticleModel)
-                soup = self._make_soup(fr.text)
-                normalized = {"title": fields.title, "date": fields.date, "body": fields.content}
-                rule = self._infer_content_dom_rule(soup, normalized)
-                if rule:
-                    rules.append(rule)
-                pages.append({"url": fr.url, "fields": normalized})
+        done_urls = {p.get("url") for p in pages}
+        tasks: list[dict[str, Any]] = []
+        for lp in [p for p in list_pages if p.get("validated")]:
+            for it in lp.get("items", [])[:3]:
+                if it.get("href") and it.get("href") not in done_urls:
+                    tasks.append(it)
+
+        def _process_content(it: dict[str, Any]) -> Optional[dict[str, Any]]:
+            fr = self._fetch(it["href"])
+            self.log.debug("step6 fetch url=%s ok=%s", it['href'], fr.ok)
+            if not fr.ok:
+                return None
+            md = self._make_page_md(fr.url, fr.text)[:15000]
+            fields = self._safe_extract("提取title/date/content", md, ArticleModel)
+            soup = self._make_soup(fr.text)
+            normalized = {"title": fields.title, "date": fields.date, "body": fields.content}
+            rule = self._infer_content_dom_rule(soup, normalized)
+            return {"url": fr.url, "fields": normalized, "rule": rule}
+
+        if tasks:
+            with ThreadPoolExecutor(max_workers=self.pool_size) as pool:
+                for out in pool.map(_process_content, tasks):
+                    if not out:
+                        continue
+                    pages.append({"url": out["url"], "fields": out["fields"]})
+                    if out.get("rule"):
+                        rules.append(out["rule"])
         step["sampled_content_pages"] = pages
         step["content_rules"] = rules
         return step
@@ -285,17 +305,15 @@ class SiteRuleAnalyzer:
         cache_key = f"fetch::{url}::bp::{bp_key}"
         if not force_refresh:
             cached = self._cache_get(cache_key)
-            if isinstance(cached, dict):
-                if cached.get("ok") is True:
-                    self.log.debug("cache hit fetch(ok): %s", url)
-                    return FetchResult(
-                        url=cached.get("url", url),
-                        ok=True,
-                        status_code=cached.get("status_code"),
-                        text=str(cached.get("text", "") or ""),
-                        error=cached.get("error"),
-                    )
-                self.log.debug("cache skip fetch(non-ok cached): %s", url)
+            if isinstance(cached, dict) and cached.get("status_code") is not None:
+                self.log.debug("cache hit fetch(http): %s status=%s", url, cached.get("status_code"))
+                return FetchResult(
+                    url=cached.get("url", url),
+                    ok=bool(cached.get("ok")),
+                    status_code=cached.get("status_code"),
+                    text=str(cached.get("text", "") or ""),
+                    error=cached.get("error"),
+                )
         ret: dict[str, Any] = {}
         ok = load_page(
             url,
@@ -319,7 +337,7 @@ class SiteRuleAnalyzer:
         code_raw = str(ret.get("code", "")).split(",")[-1].strip()
         status_code = int(code_raw) if code_raw.isdigit() else None
         fr = FetchResult(url=url, ok=ok_bool, status_code=status_code, text=str(ret.get("content", "") or ""), error=None if ok_bool else str(ret.get("code", ok)))
-        if ok_bool:
+        if status_code is not None:
             self._cache_set(cache_key, fr.__dict__)
         else:
             self.state.get("cache", {}).pop(cache_key, None)
