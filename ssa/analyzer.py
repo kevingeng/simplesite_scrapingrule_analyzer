@@ -31,6 +31,7 @@ class SiteRuleAnalyzer:
         self.session = None
         self.state: dict[str, Any] = load_json(self.state_path)
         self.state.setdefault("cache", {})
+        self.state.setdefault("site_flags", {"with_bypass": False, "bypass_param": None})
         self._rand = random.Random(42)
 
     def _persist(self) -> None:
@@ -169,7 +170,23 @@ class SiteRuleAnalyzer:
             if fr.ok:
                 step["normalized_url"] = fr.url
                 step["home_html"] = fr.text
+                step["access_check"] = {"ok": True, "status": fr.status_code}
                 return step
+            access = self._classify_access_failure(fr)
+            step["access_check"] = access
+            if access.get("need_bypass"):
+                bp = (access["reject_type"], access["block_kind"])
+                self.state["site_flags"] = {"with_bypass": True, "bypass_param": list(bp)}
+                self._persist()
+                self.log.info("step2 retry with bypass_param=%s", bp)
+                retry_fr = self._fetch(url, bypass_param=bp, force_refresh=True)
+                if retry_fr.ok:
+                    step["normalized_url"] = retry_fr.url
+                    step["home_html"] = retry_fr.text
+                    step["access_check"] = {"ok": True, "status": retry_fr.status_code, "bypass_used": True}
+                    return step
+                step["access_check"]["bypass_failed"] = True
+                raise RuntimeError(f"home fetch failed after bypass: {step['access_check']}")
         raise RuntimeError("home fetch failed")
 
     def _step_3_site_type(self, step: dict[str, Any], url: str, home_html: str) -> dict[str, Any]:
@@ -253,25 +270,68 @@ class SiteRuleAnalyzer:
         step["content_rules"] = rules
         return step
 
-    def _fetch(self, url: str) -> FetchResult:
-        cache_key = f"fetch::{url}"
-        cached = self._cache_get(cache_key)
-        if isinstance(cached, dict):
-            self.log.debug("cache hit fetch: %s", url)
-            return FetchResult(
-                url=cached.get("url", url),
-                ok=bool(cached.get("ok")),
-                status_code=cached.get("status_code"),
-                text=str(cached.get("text", "") or ""),
-                error=cached.get("error"),
-            )
+    def _fetch(self, url: str, bypass_param: Optional[tuple[str, str]] = None, force_refresh: bool = False) -> FetchResult:
+        if bypass_param is None:
+            bp_saved = self.state.get("site_flags", {}).get("bypass_param")
+            if isinstance(bp_saved, (list, tuple)) and len(bp_saved) == 2:
+                bypass_param = (str(bp_saved[0]), str(bp_saved[1]))
+        bp_key = f"{bypass_param[0]}::{bypass_param[1]}" if bypass_param else "none"
+        cache_key = f"fetch::{url}::bp::{bp_key}"
+        if not force_refresh:
+            cached = self._cache_get(cache_key)
+            if isinstance(cached, dict):
+                self.log.debug("cache hit fetch: %s", url)
+                return FetchResult(
+                    url=cached.get("url", url),
+                    ok=bool(cached.get("ok")),
+                    status_code=cached.get("status_code"),
+                    text=str(cached.get("text", "") or ""),
+                    error=cached.get("error"),
+                )
         ret: dict[str, Any] = {}
-        ok = load_page(url, ret, session=self.session, headers=headers, proxies=proxies_7890, timeout=self.timeout)
+        ok = load_page(
+            url,
+            ret,
+            session=self.session,
+            headers=headers,
+            proxies=proxies_7890,
+            timeout=self.timeout,
+            bypass_param=bypass_param,
+        )
         code_raw = str(ret.get("code", "")).split(",")[-1].strip()
         status_code = int(code_raw) if code_raw.isdigit() else None
         fr = FetchResult(url=url, ok=bool(ok), status_code=status_code, text=str(ret.get("content", "") or ""), error=None if ok else str(ret.get("code", "failed")))
         self._cache_set(cache_key, fr.__dict__)
         return fr
+
+    def _classify_access_failure(self, fr: FetchResult) -> dict[str, Any]:
+        status = fr.status_code
+        text_low = (fr.text or "").lower()
+        if status in {500, 503}:
+            return {"ok": False, "status": status, "category": "server_error", "need_bypass": False}
+        if status == 404:
+            return {"ok": False, "status": status, "category": "not_found", "need_bypass": False}
+        if status in {401, 403, 429}:
+            block_kind = "generic_waf"
+            if "cloudflare" in text_low:
+                block_kind = "cloudflare"
+            elif "akamai" in text_low:
+                block_kind = "akamai"
+            elif "incapsula" in text_low or "imperva" in text_low:
+                block_kind = "imperva_incapsula"
+            elif "captcha" in text_low:
+                block_kind = "captcha"
+            return {
+                "ok": False,
+                "status": status,
+                "category": "rejected",
+                "reject_type": "拒绝访问",
+                "block_kind": block_kind,
+                "need_bypass": True,
+            }
+        if fr.error:
+            return {"ok": False, "status": status, "category": "connect_error", "need_bypass": False, "error": fr.error}
+        return {"ok": False, "status": status, "category": "unknown_error", "need_bypass": False}
 
     def _infer_list_dom_rule(self, soup: BeautifulSoup, items: list[dict[str, str]], base_url: str) -> Optional[dict[str, Any]]:
         matched: list[Tag] = []
