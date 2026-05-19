@@ -164,6 +164,7 @@ class SiteRuleAnalyzer:
         candidates = [target] if RE_HTTP.match(target) else [f"https://{target}", f"http://{target}"]
         self.log.debug("step2 candidates=%s", candidates)
         step["candidates"] = candidates
+        failures: list[dict[str, Any]] = []
         for url in candidates:
             fr = self._fetch(url)
             self.log.debug("step2 fetched url=%s ok=%s status=%s content_len=%d", url, fr.ok, fr.status_code, len(fr.text or ""))
@@ -173,7 +174,9 @@ class SiteRuleAnalyzer:
                 step["access_check"] = {"ok": True, "status": fr.status_code}
                 return step
             access = self._classify_access_failure(fr)
+            access["url"] = url
             step["access_check"] = access
+            failures.append(access)
             if access.get("need_bypass"):
                 bp = (access["reject_type"], access["block_kind"])
                 self.state["site_flags"] = {"with_bypass": True, "bypass_param": list(bp)}
@@ -187,7 +190,9 @@ class SiteRuleAnalyzer:
                     return step
                 step["access_check"]["bypass_failed"] = True
                 raise RuntimeError(f"home fetch failed after bypass: {step['access_check']}")
-        raise RuntimeError("home fetch failed")
+        detail = {"message": "home fetch failed", "failures": failures, "candidates": candidates}
+        step["access_check"] = detail
+        raise RuntimeError(f"home fetch failed: {detail}")
 
     def _step_3_site_type(self, step: dict[str, Any], url: str, home_html: str) -> dict[str, Any]:
         self.log.info("step3 detect site_type")
@@ -280,14 +285,16 @@ class SiteRuleAnalyzer:
         if not force_refresh:
             cached = self._cache_get(cache_key)
             if isinstance(cached, dict):
-                self.log.debug("cache hit fetch: %s", url)
-                return FetchResult(
-                    url=cached.get("url", url),
-                    ok=bool(cached.get("ok")),
-                    status_code=cached.get("status_code"),
-                    text=str(cached.get("text", "") or ""),
-                    error=cached.get("error"),
-                )
+                if cached.get("ok") is True:
+                    self.log.debug("cache hit fetch(ok): %s", url)
+                    return FetchResult(
+                        url=cached.get("url", url),
+                        ok=True,
+                        status_code=cached.get("status_code"),
+                        text=str(cached.get("text", "") or ""),
+                        error=cached.get("error"),
+                    )
+                self.log.debug("cache skip fetch(non-ok cached): %s", url)
         ret: dict[str, Any] = {}
         ok = load_page(
             url,
@@ -296,12 +303,26 @@ class SiteRuleAnalyzer:
             headers=headers,
             proxies=proxies_7890,
             timeout=self.timeout,
+            return_err=True,
             bypass_param=bypass_param,
         )
+        ok_bool = ok is True
+        if not ok_bool:
+            self.log.warning(
+                "fetch failed: url=%s bypass=%s load_page_ret=%r code=%r",
+                url,
+                bypass_param,
+                ok,
+                ret.get("code"),
+            )
         code_raw = str(ret.get("code", "")).split(",")[-1].strip()
         status_code = int(code_raw) if code_raw.isdigit() else None
-        fr = FetchResult(url=url, ok=bool(ok), status_code=status_code, text=str(ret.get("content", "") or ""), error=None if ok else str(ret.get("code", "failed")))
-        self._cache_set(cache_key, fr.__dict__)
+        fr = FetchResult(url=url, ok=ok_bool, status_code=status_code, text=str(ret.get("content", "") or ""), error=None if ok_bool else str(ret.get("code", ok)))
+        if ok_bool:
+            self._cache_set(cache_key, fr.__dict__)
+        else:
+            self.state.get("cache", {}).pop(cache_key, None)
+            self._persist()
         return fr
 
     def _classify_access_failure(self, fr: FetchResult) -> dict[str, Any]:
