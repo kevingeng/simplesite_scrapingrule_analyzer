@@ -9,13 +9,15 @@ from urllib.parse import urljoin, urlparse
 
 import html2text
 from bs4 import BeautifulSoup, Tag
-try:
-    from selectolax.parser import HTMLParser
-except Exception:  # noqa: BLE001
-    HTMLParser = None
+from selectolax.parser import HTMLParser
+# try:
+#     from selectolax.parser import HTMLParser
+# except Exception:  # noqa: BLE001
+#     HTMLParser = None
+
 
 from tools.http_helper import headers, load_page, proxies_7890
-from .models import ArticleModel, FetchResult, ListItemsFitModel, ListPageModel, NavListModel, SiteAnalyzeResult, SiteTypeModel
+from .models import ArticleModel, FetchResult, ListItemsFitModel, ListPageModel, NewsSiteNavListModel,OrgSiteNavListModel, SiteAnalyzeResult, SiteTypeModel
 from .utils import load_json, save_json
 from .rule_inference import infer_content_rules, infer_list_rules
 
@@ -217,11 +219,17 @@ class SiteRuleAnalyzer:
         self.log.info("step4 extract nav")
         if step.get("homepage_navs"):
             return step
-        page_md = self._make_page_md(base_url, home_html)[:9000]
-        ins = "提取新闻相关导航nav_items" if site_type == "新闻类" else "提取政策法律新闻导航nav_items"
-        out = self._safe_extract(ins, page_md, NavListModel)
+        page_md = self._make_page_md(base_url, home_html)[:6000]
+        if site_type=='新闻类':
+            out= self._safe_extract(
+                '你的任务根据用户输入的网站首页的以markdown格式清洗后的内容提取出其可以归类为["政治类","国际新闻类","当地新闻类","战争类","人权类","女权类","社会矛盾类","犯罪或法律类","灾难事件类"]某个方面的栏目的导航，不需要不署于这几个大类的导航项。'
+                ,page_md,NewsSiteNavListModel)
+        elif site_type=='机构类':
+            out= self._safe_extract(
+                '你的任务根据用户输入的网站首页的以markdown格式清洗后的内容提取出其可以归类为["政策","法律","新闻"]某个方面的栏目的导航，不需要不署于这几个大类的导航项。',
+                page_md,OrgSiteNavListModel)    
         navs = []
-        if isinstance(out, NavListModel):
+        if out: # if isinstance(out, NavListModel):
             for n in out.nav_items:
                 u = urljoin(base_url, n.nav_href)
                 if urlparse(u).netloc == urlparse(base_url).netloc:
@@ -232,18 +240,20 @@ class SiteRuleAnalyzer:
 
     def _step_5_lists(self, step: dict[str, Any], navs: list[dict[str, str]]) -> dict[str, Any]:
         self.log.info("step5 list pages")
-        if step.get("sampled_list_pages") is not None:
-            return step
+        # if step.get("sampled_list_pages") is not None: return step ## 这里不return， 先看看有没有要增加的nav
         sampled = step.get("sampled_list_pages", [])
-        pending_navs = [n for n in navs if n.get("url") and all(p.get("url") != n.get("url") for p in sampled)]
+        _sampled_urls=set([p.get("url") for p in sampled])
+        pending_navs = [n for n in navs if n.get("url") and n.get("url") not in _sampled_urls]
+        if not pending_navs:  return step ## 没增加才 按cached来理解。
 
         def _process_nav(n: dict[str, Any]) -> dict[str, Any]:
             fr = self._fetch(n["url"])
             self.log.debug("step5 fetch url=%s ok=%s status=%s", n['url'], fr.ok, fr.status_code)
             if not fr.ok:
                 return {"url": n["url"], "items": [], "raw_html": fr.text, "validated": False, "fit_reason": f"fetch_failed:{fr.status_code}"}
-            md = self._make_page_md(n["url"], fr.text)[:12000]
-            out = self._safe_extract("提取主体列表项title/href，不是列表页返回空", md, ListPageModel)
+            md = self._make_page_md(n["url"], fr.text)[:8000]
+            out = self._safe_extract(
+                '根据用户输入的“新闻列表页以清洗后的Markdown内容”提取出其包含的主体列表项的清单，如果这个页面不是列表类页面，那不用返回任何列表项。返回的列表项只要主体新闻列表部分，不要其他非主体列表部分的项，常见不需要的例如推荐列表、参考列表等。', md, ListPageModel)
             items = []
             if out.list_page_type != "不是列表页":
                 items = [{"title": i.title, "href": urljoin(n["url"], i.href)} for i in out.list_items]
@@ -426,11 +436,12 @@ class SiteRuleAnalyzer:
             return ListItemsFitModel(fit_count=0, total_count=0, passed=False, reason="空列表项")
         sample = self._sample_items(items)
         text = "\n".join([f"- {x.get('title','')} | {x.get('href','')}" for x in sample])
-        ins = (
-            "根据站点类型判断这些列表项是否符合目标新闻采集主题。新闻类关注政治/国际/战争军事/人权/女性/社会公平/法律犯罪/灾难社会等；"
-            "机构类关注政策/法律/新闻公告。返回fit_count,total_count,passed,reason。"
-        )
-        out = self._safe_extract(ins + f"\n站点类型:{site_type}", text, ListItemsFitModel)
+        if site_type=='新闻类':
+            ins="判断用户输入的新闻列表总体上是否属于政治/国际/战争军事/人权/女权/社会公平/法律犯罪/灾难社会等领域"
+        elif site_type=='机构类':
+            ins="判断用户输入的新闻列表总体上是否属于政治活动/政策/法律/新闻公告方面"
+            
+        out = self._safe_extract(ins, text, ListItemsFitModel)
         return out
 
     def _sample_items(self, items: list[dict[str, str]]) -> list[dict[str, str]]:

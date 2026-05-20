@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional,Union
 
 from pydantic import BaseModel, Field
 
@@ -32,15 +32,36 @@ class SiteTypeModel(BaseModel):
     site_type: Literal["新闻类", "机构类"] = Field(...)
 
 
-class NavItemModel(BaseModel):
-    nav_type: str = Field(...)
-    nav_label: str = Field(...)
-    nav_href: str = Field(...)
+# class NavItemModel(BaseModel):
+#     nav_type: str = Field(...)
+#     nav_label: str = Field(...)
+#     nav_href: str = Field(...)
 
 
-class NavListModel(BaseModel):
-    nav_items: list[NavItemModel] = Field(default_factory=list)
+# class NavListModel(BaseModel):
+#     nav_items: list[NavItemModel] = Field(default_factory=list)
 
+class NewsSiteNavModel(BaseModel):
+    nav_type:Literal["政治类","国际新闻类","当地新闻类","战争类","人权类","女权类","社会矛盾类","犯罪或法律类","灾难事件类"]=Field(...,description='此导航项的类别的中文值')
+    nav_label:str =Field(...,description='导航文本')
+    nav_href:str =Field(...,description='导航链接')
+    
+class OrgSiteNavModel(BaseModel):
+    nav_type:Literal["政策","法律","新闻"]=Field(...,description='此导航项的类别的中文值')
+    nav_label:str =Field(...,description='导航文本')
+    nav_href:str =Field(...,description='导航链接')
+
+class NewsSiteNavListModel(BaseModel):
+    nav_items:list[NewsSiteNavModel]=Field(...,description='符合要求的导航项列表')
+class OrgSiteNavListModel(BaseModel):
+    nav_items:list[OrgSiteNavModel]=Field(...,description='符合要求的导航项列表')
+
+# class NavListModel(BaseModel):
+#     nav_items:  Union[list[NewsSiteNavModel],list[OrgSiteNavModel]]
+#     def __init__(self,from_model:Union[list[NewsSiteNavModel],list[OrgSiteNavModel]]):
+#         self.nav_items
+        
+    
 
 class ListPageItemModel(BaseModel):
     title: str = Field(...)
