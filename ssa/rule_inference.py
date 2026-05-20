@@ -137,20 +137,47 @@ def _infer_content_rule_from_page(raw_html: str, fields: dict[str, str]) -> Opti
     chunks = [c.strip() for c in str(fields.get("body", "")).split("\n") if len(c.strip()) > 12]
     if not chunks:
         return None
-    matched = [p for p in soup.select("article p, main p, div p, p") if any(c[:20] in p.get_text(" ", strip=True) for c in chunks[:3])]
-    if len(matched) < 2:
+
+    # 通过正文片段匹配段落，再做 LCA；标题/日期不参与该 LCA
+    paragraph_nodes = [
+        p
+        for p in soup.select("article p, main p, div p, p")
+        if any(c[:24] in p.get_text(" ", strip=True) for c in chunks[:5])
+    ]
+    if len(paragraph_nodes) < 2:
         return None
-    lca = _lowest_common_ancestor(matched)
+
+    lca = _lowest_common_ancestor(paragraph_nodes)
     if lca is None:
         return None
+
+    # 优先选择更语义化的正文根（id/class/data-testid 显式指向 article/body/content）
+    content_root = _promote_content_root(lca)
+    root_selector = _make_unique_root_selector(soup, content_root)
     return {
-        "content_root_selector": _selector_with_identity(lca),
+        "content_root_selector": root_selector,
         "title_selector": "h1",
         "date_selector": "time",
         "paragraph_selector": "p",
     }
 
 
+
+def _promote_content_root(node: Tag) -> Tag:
+    keywords = ("article", "body", "content", "正文")
+    cur: Optional[Tag] = node
+    best = node
+    while isinstance(cur, Tag):
+        nid = str(cur.get("id", "") or "").lower()
+        classes = " ".join([c for c in (cur.get("class") or []) if isinstance(c, str)]).lower()
+        dt = str(cur.get("data-testid", "") or "").lower()
+        text = f"{nid} {classes} {dt}"
+        if any(k in text for k in keywords):
+            best = cur
+            if nid:
+                break
+        cur = cur.parent if isinstance(cur.parent, Tag) else None
+    return best
 
 def _make_unique_root_selector(soup: BeautifulSoup, node: Tag) -> str:
     base = _selector_with_identity(node)
