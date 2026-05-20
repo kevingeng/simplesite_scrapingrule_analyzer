@@ -15,7 +15,7 @@ except Exception:  # noqa: BLE001
     HTMLParser = None
 
 from tools.http_helper import headers, load_page, proxies_7890
-from .models import ArticleModel, FetchResult, ListItemsFitModel, ListPageModel, NavListModel, SiteAnalyzeResult, SiteTypeModel
+from .models import ArticleModel, FetchResult, ListItemsFitModel, ListPageModel, NewsSiteNavListModel,OrgSiteNavListModel, SiteAnalyzeResult, SiteTypeModel
 from .utils import load_json, save_json
 from .rule_inference import infer_content_rules, infer_list_rules
 
