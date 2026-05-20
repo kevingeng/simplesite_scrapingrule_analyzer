@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument("--force-restep", type=int, default=0)
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--pool-size", type=int, default=16)
-    parser.add_argument("--llm-name", default="qwen3-max")
+    parser.add_argument("--llm-name", default="max")
     args = parser.parse_args()
 
     logger = make_logger(args.log_level)

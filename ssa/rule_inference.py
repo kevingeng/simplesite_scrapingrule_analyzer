@@ -274,7 +274,7 @@ def _ancestor_chain(node: Tag) -> list[Tag]:
 def _selector_with_identity(node: Tag) -> str:
     if node.get("id"):
         return f"#{node['id']}"
-    classes = [c for c in (node.get("class") or []) if isinstance(c, str)]
+    classes = [c for c in (node.get("class") or []) if isinstance(c, str) and ':' not in c and '/' not in c]
     if classes:
         return f"{node.name}." + ".".join(classes[:2])
     return _css_path(node)
@@ -309,7 +309,7 @@ def _css_path(node: Tag) -> str:
 def _segment(node: Tag) -> str:
     if node.get("id"):
         return f"#{node['id']}"
-    cls = [c for c in (node.get("class") or []) if isinstance(c, str)]
+    cls = [c for c in (node.get("class") or []) if isinstance(c, str) and ':' not in c and '/' not in c]
     if cls:
         return f"{node.name}." + ".".join(cls[:2])
     data_attr = next((k for k in node.attrs if isinstance(k, str) and k.startswith("data-")), None)
