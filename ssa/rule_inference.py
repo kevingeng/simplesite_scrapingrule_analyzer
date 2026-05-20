@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections import Counter
+from itertools import groupby
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urljoin
+from rapidfuzz import fuzz
 
 from bs4 import BeautifulSoup, Tag
 
@@ -65,11 +67,55 @@ def infer_content_rules(content_pages: list[dict[str, Any]]) -> dict[str, Any]:
 def _infer_list_rule_from_page(raw_html: str, items: list[dict[str, str]], base_url: str) -> Optional[dict[str, Any]]:
     soup = BeautifulSoup(raw_html, "html.parser")
     matched: list[Tag] = []
-    href_set = {i.get("href", "") for i in items if i.get("href")}
-    for a in soup.select("a[href]"):
+
+    href_items = sorted([i for i in items if i.get("href")], key=lambda i: i["href"])
+    href_map: dict[str, dict[str, Any]] = {
+        k: {"T": list(g)[0].get("title", ""), "M": []}
+        for k, g in groupby(href_items, key=lambda i: i["href"])
+    }
+
+    for ai, a in enumerate(soup.select("a[href]")):
         ah = urljoin(base_url, (a.get("href") or "").strip())
-        if ah in href_set:
-            matched.append(a)
+        if ah in href_map:
+            href_map[ah]["M"].append((a, ai))
+
+    for ad in href_map.values():
+        mm = ad.get("M") or []
+        if not mm:
+            continue
+        title = str(ad.get("T", "") or "")
+
+        # 优先直接文本匹配，再退化到全文本匹配；同分时优先更深节点
+        direct = []
+        for a, ai in mm:
+            ds = a.string.strip() if isinstance(a.string, str) else ""
+            if not ds:
+                continue
+            score = fuzz.ratio(title, ds)
+            if score >= 80:
+                depth = len(list(a.parents))
+                direct.append((a, ai, score, depth))
+
+        chosen: Optional[Tag] = None
+        if direct:
+            chosen = max(direct, key=lambda x: (x[2], x[3], x[1]))[0]
+        else:
+            full = []
+            for a, ai in mm:
+                ft = a.get_text(" ", strip=True)
+                if not ft:
+                    continue
+                score = fuzz.ratio(title, ft)
+                if score >= 80:
+                    depth = len(list(a.parents))
+                    full.append((a, ai, score, depth))
+            if full:
+                chosen = max(full, key=lambda x: (x[2], x[3], x[1]))[0]
+
+        if chosen is None:
+            raise ValueError("没有标题和HREF都匹配的超链")
+        matched.append(chosen)
+
     if len(matched) < 2:
         return None
     lca = _lowest_common_ancestor(matched)
